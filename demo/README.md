@@ -273,7 +273,52 @@ Example response:
 
 > The current version stores `Order` and `OrderItem` through separate operations. A future version can add one endpoint that creates an order together with all its order items in a single transaction.
 
-### 8.4 Category API
+### 8.4 Order Item API
+
+| Method | Endpoint | Description |
+|---|---|---|
+| `GET` | `/orders/{orderId}/items` | Get all items for an order |
+| `GET` | `/orders/{orderId}/items/{productId}` | Get one item by composite key |
+| `POST` | `/orders/{orderId}/items` | Create an item for an order |
+| `PUT` | `/orders/{orderId}/items/{productId}` | Update an existing order item |
+| `DELETE` | `/orders/{orderId}/items/{productId}` | Delete an order item |
+
+Example request:
+
+```http
+POST /orders/1/items
+Content-Type: application/json
+```
+
+```json
+{
+  "id": {
+    "orderId": 999,
+    "productId": 10
+  },
+  "quantity": 2,
+  "unitPrice": 79.90
+}
+```
+
+Example response:
+
+```json
+{
+  "id": {
+    "orderId": 1,
+    "productId": 10
+  },
+  "quantity": 2,
+  "unitPrice": 79.90
+}
+```
+
+> `orderId` is always taken from the path. If request body `id.orderId` conflicts, the path value is applied.
+>
+> Stock reduction behavior for new order items is handled by a database trigger (`src/main/db/triggers.sql`). This SQL trigger is database-side and may need to be installed manually in MariaDB before testing this behavior.
+
+### 8.5 Category API
 
 | Method | Endpoint | Description |
 |---|---|---|
@@ -284,7 +329,7 @@ Example response:
 
 The current `CategoryController` does not yet provide a `PUT` endpoint.
 
-### 8.5 Supplier API
+### 8.6 Supplier API
 
 | Method | Endpoint | Description |
 |---|---|---|
@@ -331,6 +376,8 @@ END;
 ```
 
 The trigger automatically decreases the product stock after a new order item is inserted.
+
+> The trigger is implemented in SQL and runs in MariaDB. If your local database does not yet contain it, execute `src/main/db/triggers.sql` manually.
 
 The current implementation should be extended with stock validation to prevent negative stock. Additional trigger logic could also handle order item updates, deletions, and stock restoration when an order is cancelled.
 
@@ -434,7 +481,6 @@ This project is an academic database and REST API prototype. For production use,
 
 Possible future improvements include:
 
-- Add an `OrderItemController` and service layer.
 - Create orders together with their items in one transaction.
 - Validate and lock product stock during checkout.
 - Restore stock when an order is cancelled.
