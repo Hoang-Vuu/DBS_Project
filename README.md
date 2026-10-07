@@ -237,7 +237,8 @@ Example response:
 |---|---|---|
 | `GET` | `/orders` | Get all orders |
 | `GET` | `/orders/{id}` | Get an order by ID |
-| `POST` | `/orders` | Create an order |
+| `POST` | `/orders` | Create only an order header (simple CRUD) |
+| `POST` | `/orders/checkout` | Create an order with items in one transaction (recommended webshop flow) |
 | `PUT` | `/orders/{id}` | Update an order |
 | `DELETE` | `/orders/{id}` | Delete an order |
 
@@ -271,7 +272,62 @@ Example response:
 }
 ```
 
-> The current version stores `Order` and `OrderItem` through separate operations. A future version can add one endpoint that creates an order together with all its order items in a single transaction.
+> `POST /orders` remains for simple CRUD on the order header. For webshop checkout, use `POST /orders/checkout` so order + items are created atomically in one transaction.
+
+### 8.3.1 Checkout API (Transactional Order + Items)
+
+```http
+POST /orders/checkout
+Content-Type: application/json
+```
+
+Request example:
+
+```json
+{
+  "customerId": 1,
+  "deliveryDate": "2026-10-10T10:30:00",
+  "shippingAddressId": 2,
+  "items": [
+    { "productId": 10, "quantity": 2 },
+    { "productId": 15, "quantity": 1 }
+  ]
+}
+```
+
+Success response (`201 Created`) example:
+
+```json
+{
+  "orderId": 101,
+  "customerId": 1,
+  "orderDate": "2026-10-07T12:00:00",
+  "deliveryDate": "2026-10-10T10:30:00",
+  "shippingAddressId": 2,
+  "status": "PENDING",
+  "items": [
+    { "productId": 10, "quantity": 2, "unitPrice": 79.90 },
+    { "productId": 15, "quantity": 1, "unitPrice": 12.50 }
+  ]
+}
+```
+
+Error response shape (used for `400`, `404`, `409`) example:
+
+```json
+{
+  "timestamp": "2026-10-07T12:00:00",
+  "status": 409,
+  "error": "Conflict",
+  "message": "Insufficient stock for product 10",
+  "path": "/orders/checkout"
+}
+```
+
+Status mapping:
+- `400 Bad Request`: invalid request body (missing fields, empty items, non-positive quantity).
+- `404 Not Found`: missing customer or product.
+- `409 Conflict`: duplicate product in one order or insufficient stock.
 
 ### 8.4 Order Item API
 
@@ -375,11 +431,11 @@ BEGIN
 END;
 ```
 
-The trigger automatically decreases the product stock after a new order item is inserted.
+The trigger is the single stock-decrement source of truth in this project: stock is reduced after each `orderitems` insert.
 
-> The trigger is implemented in SQL and runs in MariaDB. If your local database does not yet contain it, execute `src/main/db/triggers.sql` manually.
+> The trigger is implemented in SQL and runs in MariaDB. If your local database does not yet contain it, execute `src/main/db/triggers.sql` manually after schema creation.
 
-The current implementation should be extended with stock validation to prevent negative stock. Additional trigger logic could also handle order item updates, deletions, and stock restoration when an order is cancelled.
+`OrderService#createOrderWithItems` does **not** decrement stock in Java to avoid double-decrement. Instead, it locks products (`PESSIMISTIC_WRITE`) and validates stock before inserting order items; then the trigger performs the decrement exactly once.
 
 ### 9.3 Database Indexes
 
@@ -415,34 +471,28 @@ ORDER BY order_date DESC;
 
 ### 9.4 Transactions
 
-`OrderService` uses Spring's `@Transactional` annotation when saving an order:
+`OrderService#createOrderWithItems` now uses a single `@Transactional` workflow for checkout:
 
-```java
-@Transactional
-public Order save(Order order) {
-    return repository.save(order);
-}
-```
+1. Validate request shape (required fields, non-empty items, positive quantities).
+2. Validate customer existence.
+3. Reject duplicate product IDs in the same order.
+4. Lock each product row (`PESSIMISTIC_WRITE`), validate product existence, and validate stock.
+5. Create and persist the order (default `orderDate=now`, `status=PENDING` when omitted).
+6. Create and persist order items with unit price snapshots from current product prices.
+7. Let `trg_reduce_stock` decrement stock once for each inserted order item.
 
-A transaction ensures that the database operation is executed atomically. The recommended next step is to extend the transaction to cover the complete order workflow:
-
-1. Validate the customer.
-2. Validate the products.
-3. Check product stock.
-4. Create the order.
-5. Create the order items.
-6. Update the stock.
-7. Roll back all changes if any step fails.
+If any validation or persistence step fails, Spring rolls the whole transaction back, so partial order headers/items are not committed.
 
 ## 10. Testing
 
-The current test class is:
+The project includes unit tests for application context loading, `OrderItem` routing/service logic, and checkout workflow validation, including:
 
-```text
-src/test/java/com/example/demo/DemoApplicationTests.java
-```
-
-At the moment, the test verifies that the Spring application context loads successfully.
+- successful multi-item checkout
+- missing customer/product
+- non-positive quantity
+- duplicate product ID
+- insufficient stock with no persistence side-effects
+- unit-price snapshot behavior
 
 Run all tests with:
 
@@ -469,10 +519,8 @@ The current version does not yet implement:
 - Authorization and role-based access control
 - Customer and administrator roles
 - Password hashing
-- Centralized exception handling
-- Complete request validation using DTOs and `@Valid`
+- Full Bean Validation (`@Valid`) coverage on all endpoints
 - OpenAPI/Swagger documentation
-- A complete order creation workflow with order items
 - Temporal or audit history for order status changes
 
 This project is an academic database and REST API prototype. For production use, the application should use a dedicated database user instead of `root`, externalized secrets, authentication, authorization, validation, and structured error handling.
@@ -481,12 +529,10 @@ This project is an academic database and REST API prototype. For production use,
 
 Possible future improvements include:
 
-- Create orders together with their items in one transaction.
-- Validate and lock product stock during checkout.
-- Restore stock when an order is cancelled.
+- Add integration tests against MariaDB trigger behavior (`trg_reduce_stock`) in CI.
+- Restore stock when an order is cancelled or items are removed.
 - Add order status history and audit tables.
 - Add authentication and role-based authorization.
-- Add DTOs, validation, and a global exception handler.
 - Add Swagger/OpenAPI documentation.
 - Add integration tests for views, triggers, indexes, and transactions.
 
